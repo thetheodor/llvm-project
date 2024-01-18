@@ -69,6 +69,7 @@
 #include "llvm/Transforms/IPO/SyntheticCountsPropagation.h"
 #include "llvm/Transforms/IPO/WholeProgramDevirt.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Instrumentation/CFGPrune.h"
 #include "llvm/Transforms/Instrumentation/CGProfile.h"
 #include "llvm/Transforms/Instrumentation/ControlHeightReduction.h"
 #include "llvm/Transforms/Instrumentation/InstrOrderFile.h"
@@ -138,6 +139,16 @@
 
 using namespace llvm;
 
+static cl::opt<CFGPruningMode> CFGPruning(
+    "cfg-pruning", cl::init(CFGPruningMode::Off), cl::Hidden,
+    cl::desc("CFG Pruning"),
+    cl::values(clEnumValN(CFGPruningMode::Off, "off",
+                          "CFG pruning is disabled"),
+               clEnumValN(CFGPruningMode::Profile, "profile",
+                          "profile the program to guide CFG pruning"),
+               clEnumValN(CFGPruningMode::Prune, "prune",
+                          "prune the CFG based on the profile information")));
+
 static cl::opt<InliningAdvisorMode> UseInlineAdvisor(
     "enable-ml-inliner", cl::init(InliningAdvisorMode::Default), cl::Hidden,
     cl::desc("Enable ML policy for inliner. Currently trained for -Oz only"),
@@ -180,9 +191,9 @@ static cl::opt<bool> EnablePostPGOLoopRotation(
     "enable-post-pgo-loop-rotation", cl::init(true), cl::Hidden,
     cl::desc("Run the loop rotation transformation after PGO instrumentation"));
 
-static cl::opt<bool> EnableGlobalAnalyses(
-    "enable-global-analyses", cl::init(true), cl::Hidden,
-    cl::desc("Enable inter-procedural analyses"));
+static cl::opt<bool>
+    EnableGlobalAnalyses("enable-global-analyses", cl::init(true), cl::Hidden,
+                         cl::desc("Enable inter-procedural analyses"));
 
 static cl::opt<bool>
     RunPartialInlining("enable-partial-inlining", cl::init(false), cl::Hidden,
@@ -1083,11 +1094,10 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
   // and prior to optimizing globals.
   // FIXME: This position in the pipeline hasn't been carefully considered in
   // years, it should be re-analyzed.
-  MPM.addPass(IPSCCPPass(
-              IPSCCPOptions(/*AllowFuncSpec=*/
-                            Level != OptimizationLevel::Os &&
-                            Level != OptimizationLevel::Oz &&
-                            !isLTOPreLink(Phase))));
+  MPM.addPass(IPSCCPPass(IPSCCPOptions(/*AllowFuncSpec=*/
+                                       Level != OptimizationLevel::Os &&
+                                       Level != OptimizationLevel::Oz &&
+                                       !isLTOPreLink(Phase))));
 
   // Attach metadata to indirect call sites indicating the set of functions
   // they may target at run-time. This should follow IPSCCP.
@@ -1153,6 +1163,9 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
   // Optimize globals now that functions are fully simplified.
   MPM.addPass(GlobalOptPass());
   MPM.addPass(GlobalDCEPass());
+
+  if (CFGPruning == CFGPruningMode::Profile)
+    MPM.addPass(CFGTrackPass());
 
   return MPM;
 }
@@ -1552,7 +1565,7 @@ PassBuilder::buildFatLTODefaultPipeline(OptimizationLevel Level) {
 ModulePassManager
 PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
   if (Level == OptimizationLevel::O0)
-    return buildO0DefaultPipeline(Level, /*LTOPreLink*/true);
+    return buildO0DefaultPipeline(Level, /*LTOPreLink*/ true);
 
   ModulePassManager MPM;
 
